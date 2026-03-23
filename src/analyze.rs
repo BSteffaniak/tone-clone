@@ -58,6 +58,65 @@ pub struct TypeSummary {
     pub question_rate: f64,
 }
 
+/// Strip code blocks, inline code, and URLs from text so analysis only sees prose.
+pub fn strip_code(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+
+    while let Some((i, ch)) = chars.next() {
+        // Fenced code blocks: ```...```
+        if ch == '`' && text[i..].starts_with("```") {
+            // Skip opening ```
+            chars.next(); // second `
+            chars.next(); // third `
+                          // Skip until closing ``` or end of string
+            loop {
+                match chars.next() {
+                    Some((j, '`')) if text[j..].starts_with("```") => {
+                        chars.next();
+                        chars.next();
+                        break;
+                    }
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+            result.push(' ');
+            continue;
+        }
+
+        // Inline code: `...`
+        if ch == '`' {
+            loop {
+                match chars.next() {
+                    Some((_, '`')) => break,
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+            continue;
+        }
+
+        // URLs: http:// or https://
+        if ch == 'h' && (text[i..].starts_with("http://") || text[i..].starts_with("https://")) {
+            // Skip until whitespace or end
+            loop {
+                match chars.peek() {
+                    Some(&(_, c)) if !c.is_whitespace() => {
+                        chars.next();
+                    }
+                    _ => break,
+                }
+            }
+            continue;
+        }
+
+        result.push(ch);
+    }
+
+    result
+}
+
 fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
@@ -342,21 +401,27 @@ fn is_all_stopwords(words: &[&str]) -> bool {
 }
 
 /// Build a full voice profile from a set of post bodies.
+/// Word count stats use raw bodies (post length including code is meaningful).
+/// All other analysis uses prose-only text (code blocks, inline code, URLs stripped).
 pub fn build_profile(bodies: &[&str]) -> VoiceProfile {
+    let stripped: Vec<String> = bodies.iter().map(|b| strip_code(b)).collect();
+    let stripped_refs: Vec<&str> = stripped.iter().map(|s| s.as_str()).collect();
+
     VoiceProfile {
         total_posts: bodies.len(),
         word_count: word_count_stats(bodies),
-        sentence: sentence_stats(bodies),
-        lowercase_start_rate: lowercase_start_rate(bodies),
-        contraction_rate: contraction_rate(bodies),
-        question_rate: question_rate(bodies),
-        punctuation: punctuation_inventory(bodies),
-        bigrams: common_ngrams(bodies, 2, 15),
-        trigrams: common_ngrams(bodies, 3, 10),
+        sentence: sentence_stats(&stripped_refs),
+        lowercase_start_rate: lowercase_start_rate(&stripped_refs),
+        contraction_rate: contraction_rate(&stripped_refs),
+        question_rate: question_rate(&stripped_refs),
+        punctuation: punctuation_inventory(&stripped_refs),
+        bigrams: common_ngrams(&stripped_refs, 2, 15),
+        trigrams: common_ngrams(&stripped_refs, 3, 10),
     }
 }
 
 /// Build per-type summaries.
+/// Word count uses raw bodies; style rates use prose-only text.
 pub fn type_summaries(posts: &[Post]) -> Vec<TypeSummary> {
     let mut by_type: HashMap<String, Vec<&str>> = HashMap::new();
 
@@ -371,12 +436,14 @@ pub fn type_summaries(posts: &[Post]) -> Vec<TypeSummary> {
         .into_iter()
         .map(|(post_type, bodies)| {
             let bodies_ref: Vec<&str> = bodies.into_iter().collect();
+            let stripped: Vec<String> = bodies_ref.iter().map(|b| strip_code(b)).collect();
+            let stripped_refs: Vec<&str> = stripped.iter().map(|s| s.as_str()).collect();
             TypeSummary {
                 post_type,
                 count: bodies_ref.len(),
                 word_count: word_count_stats(&bodies_ref),
-                lowercase_start_rate: lowercase_start_rate(&bodies_ref),
-                question_rate: question_rate(&bodies_ref),
+                lowercase_start_rate: lowercase_start_rate(&stripped_refs),
+                question_rate: question_rate(&stripped_refs),
             }
         })
         .collect();
@@ -439,56 +506,6 @@ pub fn select_diverse_examples(posts: &[Post], limit: usize) -> Vec<&Post> {
                     selected.push(post);
                     picked_any = true;
                 }
-            }
-        }
-
-        if !picked_any {
-            break;
-        }
-        from_start = !from_start;
-    }
-
-    // Bucket by repo, then pick round-robin from buckets, preferring variety in length
-    let mut by_repo: HashMap<Option<&str>, Vec<&Post>> = HashMap::new();
-    for post in posts {
-        by_repo.entry(post.repo.as_deref()).or_default().push(post);
-    }
-
-    // Sort each bucket by word count so we get length variety when picking
-    for bucket in by_repo.values_mut() {
-        bucket.sort_by_key(|p| word_count(&p.body));
-    }
-
-    let mut buckets: Vec<Vec<&Post>> = by_repo.into_values().collect();
-    // Sort buckets by size descending so we start with the largest
-    buckets.sort_by(|a, b| b.len().cmp(&a.len()));
-
-    let mut selected: Vec<&Post> = Vec::with_capacity(limit);
-    let mut indices: Vec<usize> = vec![0; buckets.len()];
-
-    // Round-robin, picking from alternating ends of each bucket for length variety
-    let mut from_start = true;
-    while selected.len() < limit {
-        let mut picked_any = false;
-        for (i, bucket) in buckets.iter().enumerate() {
-            if selected.len() >= limit {
-                break;
-            }
-            if indices[i] >= bucket.len() {
-                continue;
-            }
-
-            let idx = if from_start {
-                indices[i]
-            } else {
-                bucket.len() - 1 - indices[i]
-            };
-
-            // Bounds check (when bucket is small and indices[i] wraps)
-            if idx < bucket.len() {
-                selected.push(bucket[idx]);
-                indices[i] += 1;
-                picked_any = true;
             }
         }
 
@@ -565,5 +582,47 @@ mod tests {
         let bigrams = common_ngrams(&bodies, 2, 5);
         // "brown fox" and "quick" phrases should appear
         assert!(!bigrams.is_empty());
+    }
+
+    #[test]
+    fn test_strip_code_fenced() {
+        let text =
+            "here is some text\n```rust\nfn main() { println!(\"hello\"); }\n```\nand more text";
+        let stripped = strip_code(text);
+        assert!(!stripped.contains("fn main"));
+        assert!(!stripped.contains("println"));
+        assert!(stripped.contains("here is some text"));
+        assert!(stripped.contains("and more text"));
+    }
+
+    #[test]
+    fn test_strip_code_inline() {
+        let text = "use `foo_bar` for this";
+        let stripped = strip_code(text);
+        assert!(!stripped.contains("foo_bar"));
+        assert!(stripped.contains("use"));
+        assert!(stripped.contains("for this"));
+    }
+
+    #[test]
+    fn test_strip_code_urls() {
+        let text = "check https://example.com/path?q=1 for details";
+        let stripped = strip_code(text);
+        assert!(!stripped.contains("https://"));
+        assert!(!stripped.contains("example.com"));
+        assert!(stripped.contains("check"));
+        assert!(stripped.contains("for details"));
+    }
+
+    #[test]
+    fn test_strip_code_mixed() {
+        let text = "I added `Config` in ```\nstruct Config {}\n``` see https://github.com/foo/bar for context";
+        let stripped = strip_code(text);
+        assert!(!stripped.contains("Config"));
+        assert!(!stripped.contains("struct"));
+        assert!(!stripped.contains("github.com"));
+        assert!(stripped.contains("I added"));
+        assert!(stripped.contains("see"));
+        assert!(stripped.contains("for context"));
     }
 }
