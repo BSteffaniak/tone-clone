@@ -1,4 +1,6 @@
+mod analyze;
 mod db;
+mod generate;
 mod models;
 mod query;
 mod source;
@@ -86,6 +88,36 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         r#type: Option<Vec<String>>,
     },
+    /// Generate voice profile and example files from your writing
+    Generate {
+        /// Output directory (default: ~/.local/share/tone-clone/profiles/)
+        #[arg(long)]
+        output_dir: Option<String>,
+
+        /// Print to stdout instead of writing files
+        #[arg(long)]
+        stdout: bool,
+
+        /// Only generate for a specific post type
+        #[arg(long)]
+        r#type: Option<String>,
+
+        /// FTS search to focus examples on a topic
+        #[arg(long)]
+        topic: Option<String>,
+
+        /// Max examples per type (default: 10)
+        #[arg(long, default_value = "10")]
+        limit: usize,
+
+        /// Include posts flagged as likely AI (excluded by default)
+        #[arg(long)]
+        no_exclude_ai: bool,
+
+        /// Filter to a specific source ID
+        #[arg(long)]
+        source_id: Option<i64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -147,6 +179,27 @@ async fn run() -> Result<(), Error> {
                 .as_ref()
                 .map(|v| v.iter().map(|s| s.as_str()).collect());
             cmd_query(db.as_ref(), &terms, limit, exclude_ai, type_strs.as_deref()).await?
+        }
+        Commands::Generate {
+            output_dir,
+            stdout,
+            r#type,
+            topic,
+            limit,
+            no_exclude_ai,
+            source_id,
+        } => {
+            let mut opts = generate::GenerateOpts::default();
+            if let Some(dir) = output_dir {
+                opts.output_dir = std::path::PathBuf::from(dir);
+            }
+            opts.stdout = stdout;
+            opts.post_type = r#type;
+            opts.topic = topic;
+            opts.limit = limit;
+            opts.exclude_ai = !no_exclude_ai;
+            opts.source_id = source_id;
+            generate::run(db.as_ref(), &opts).await?
         }
     }
 

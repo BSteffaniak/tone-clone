@@ -47,6 +47,67 @@ pub async fn search(
     Ok(posts)
 }
 
+/// Fetch posts with flexible filtering. Used by the generate command.
+pub async fn fetch_posts(
+    db: &dyn Database,
+    exclude_ai: bool,
+    post_type: Option<&str>,
+    topic: Option<&str>,
+    source_id: Option<i64>,
+) -> Result<Vec<Post>, Error> {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<DatabaseValue> = Vec::new();
+    let mut use_fts = false;
+
+    if exclude_ai {
+        conditions.push("p.likely_ai = 0".to_string());
+    }
+
+    if let Some(pt) = post_type {
+        conditions.push("p.post_type = ?".to_string());
+        params.push(DatabaseValue::String(pt.to_string()));
+    }
+
+    if let Some(sid) = source_id {
+        conditions.push("p.source_id = ?".to_string());
+        params.push(DatabaseValue::Int64(sid));
+    }
+
+    if let Some(terms) = topic {
+        conditions.push("posts_fts MATCH ?".to_string());
+        params.push(DatabaseValue::String(terms.to_string()));
+        use_fts = true;
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
+    let sql = if use_fts {
+        format!(
+            "SELECT p.* FROM posts p
+             JOIN posts_fts ON posts_fts.rowid = p.id
+             {where_clause}
+             ORDER BY p.created_at"
+        )
+    } else {
+        format!(
+            "SELECT p.* FROM posts p
+             {where_clause}
+             ORDER BY p.created_at"
+        )
+    };
+
+    let rows = db.query_raw_params(&sql, &params).await?;
+    let mut posts = Vec::with_capacity(rows.len());
+    for row in &rows {
+        posts.push(Post::from_row(row)?);
+    }
+    Ok(posts)
+}
+
 /// Get aggregate stats about the database.
 pub async fn stats(db: &dyn Database, source_id: Option<i64>) -> Result<Stats, Error> {
     let (where_clause, params) = if let Some(sid) = source_id {
